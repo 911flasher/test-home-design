@@ -2,6 +2,8 @@
 
 An interactive 3D garden designer playable ad built with Three.js and Vite. This is a demonstration of a mobile-friendly, engaging ad experience for a fictional garden design app.
 
+![Project Preview](./test_img.png)
+
 ## 🎯 Features
 
 - **3D Interactive Garden Environment** - Beautiful 3D scene with dynamic lighting
