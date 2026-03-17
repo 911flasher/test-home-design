@@ -1,10 +1,32 @@
 import * as THREE from 'three';
+import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js';
 
 export class ItemManager {
     constructor() {
         this.items = [];
         this.objectsModel = null;
-        this.textureLoader = new THREE.TextureLoader();
+        this.objectAnimations = [];
+        this.animationMixers = [];
+        this.modelMap = {
+            grape: ['grape_1', 'grape_2', 'grape_3', 'grape'],
+            corn: ['corn_1', 'corn_2', 'corn_3', 'corn'],
+            strawberry: ['strawberry_1', 'strawberry_2', 'strawberry_3', 'strawberry'],
+            tomato: ['tomato_1', 'tomato_2', 'tomato_3', 'tomato'],
+            fence: ['fence'],
+            cow: ['cow_1'],
+            sheep: ['sheep_1'],
+            chicken: ['chicken_1']
+        };
+        this.modelSizeTargets = {
+            corn: 3.2,
+            grape: 3.0,
+            strawberry: 2.5,
+            tomato: 2.7,
+            fence: 5.2,
+            cow: 5.0,
+            sheep: 4.2,
+            chicken: 2.8
+        };
         
         this.categories = {
             plants: [
@@ -26,11 +48,12 @@ export class ItemManager {
         };
     }
     
-    setObjectsModel(model) {
+    setObjectsModel(model, animations = []) {
         this.objectsModel = model;
+        this.objectAnimations = animations;
     }
     
-    addItem(category, type, x, z) {
+    addItem(category, type, x, z, y = 0) {
         const categoryData = this.categories[category];
         if (!categoryData) return null;
         
@@ -40,7 +63,7 @@ export class ItemManager {
         const config = categoryData.find(entry => entry.type === type);
         const baseScale = config?.scale || 1;
         
-        const baseY = 0.62;
+        const baseY = y + 0.02;
 
         item.position.set(x, baseY, z);
         item.scale.setScalar(0.01);
@@ -56,12 +79,21 @@ export class ItemManager {
         item.userData.targetScale = baseScale;
         item.userData.animationTime = 0;
         item.userData.animationDuration = 0.65;
+
+        if (category === 'animals') {
+            item.rotation.y = THREE.MathUtils.degToRad(Math.random() * 180);
+        }
         
         this.items.push(item);
         return { mesh: item, data: item.userData };
     }
     
     createItem(category, type) {
+        const modelItem = this.createModelItem(type);
+        if (modelItem) {
+            return modelItem;
+        }
+
         if (category === 'plants') {
             return this.createPlant(type);
         } else if (category === 'furniture') {
@@ -70,6 +102,180 @@ export class ItemManager {
             return this.createAnimal(type);
         }
         return null;
+    }
+
+    createModelItem(type) {
+        if (!this.objectsModel || !this.modelMap[type]) {
+            return null;
+        }
+
+        const source = this.findModelSourceByAliases(this.modelMap[type]);
+        if (!source) {
+            return null;
+        }
+
+        const modelGroup = new THREE.Group();
+        const clone = cloneSkinned(source);
+        modelGroup.add(clone);
+
+        const wrapper = new THREE.Group();
+        wrapper.add(modelGroup);
+        wrapper.scale.setScalar(0.5);
+        this.normalizeModelWrapper(modelGroup);
+        this.applyModelTargetSize(modelGroup, type);
+        this.prepareModelShadows(wrapper);
+
+        if (this.isAnimatedAnimal(type)) {
+            this.setupAnimalAnimations(wrapper, type);
+        }
+
+        return wrapper;
+    }
+
+    findModelSourceByAliases(names) {
+        for (const name of names) {
+            const source = this.findModelSource(name);
+            if (source) {
+                return source;
+            }
+        }
+
+        return null;
+    }
+
+    findModelSource(name) {
+        if (!this.objectsModel) {
+            return null;
+        }
+
+        const directMatch = this.objectsModel.getObjectByName(name);
+        if (directMatch) {
+            return directMatch;
+        }
+
+        let prefixMatch = null;
+        this.objectsModel.traverse((child) => {
+            if (prefixMatch || !child.name) return;
+            if (child.name === name || child.name.startsWith(`${name}_`) || child.name.startsWith(`${name}.`)) {
+                prefixMatch = child;
+            }
+        });
+
+        return prefixMatch;
+    }
+
+    normalizeModelWrapper(group) {
+        group.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(group);
+
+        if (box.isEmpty()) {
+            return;
+        }
+
+        const center = box.getCenter(new THREE.Vector3());
+        group.position.x -= center.x;
+        group.position.z -= center.z;
+        group.position.y -= box.min.y;
+    }
+
+    applyModelTargetSize(group, type) {
+        const targetSize = this.modelSizeTargets[type];
+        if (!targetSize) {
+            return;
+        }
+
+        group.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(group);
+        if (box.isEmpty()) {
+            return;
+        }
+
+        const size = box.getSize(new THREE.Vector3());
+        const currentMaxDimension = Math.max(size.x, size.y, size.z);
+        if (currentMaxDimension <= 0) {
+            return;
+        }
+
+        const scaleFactor = targetSize / currentMaxDimension;
+        group.scale.multiplyScalar(scaleFactor);
+        group.updateMatrixWorld(true);
+
+        const adjustedBox = new THREE.Box3().setFromObject(group);
+        group.position.y -= adjustedBox.min.y;
+    }
+
+    prepareModelShadows(group) {
+        group.traverse((child) => {
+            if (child.isMesh || child.isSkinnedMesh) {
+                child.castShadow = true;
+                child.receiveShadow = true;
+                child.frustumCulled = false;
+                child.renderOrder = 1;
+
+                const materials = Array.isArray(child.material) ? child.material : [child.material];
+                materials.filter(Boolean).forEach((material) => {
+                    material.needsUpdate = true;
+                });
+
+                if (child.isSkinnedMesh) {
+                    child.bindMode = 'attached';
+                }
+
+                if (child.geometry) {
+                    child.geometry.computeBoundingBox();
+                    child.geometry.computeBoundingSphere();
+                }
+            }
+        });
+    }
+
+    isAnimatedAnimal(type) {
+        return type === 'cow' || type === 'sheep' || type === 'chicken';
+    }
+
+    setupAnimalAnimations(group, type) {
+        const mixer = new THREE.AnimationMixer(group);
+        const idleClip = this.findAnimationClip(`idle_${type}`);
+        const actionClip = this.findAnimationClip(`action_${type}`);
+        const idleAction = idleClip ? mixer.clipAction(idleClip) : null;
+        const actionAction = actionClip ? mixer.clipAction(actionClip) : null;
+
+        if (idleAction) {
+            idleAction.enabled = true;
+            idleAction.reset();
+            idleAction.play();
+        }
+
+        if (actionAction) {
+            actionAction.loop = THREE.LoopOnce;
+            actionAction.clampWhenFinished = true;
+            mixer.addEventListener('finished', (event) => {
+                if (event.action !== actionAction) return;
+
+                actionAction.stop();
+                if (idleAction) {
+                    idleAction.reset();
+                    idleAction.play();
+                }
+
+                group.userData.nextRandomActionAt = this.getNextActionDelay();
+            });
+        }
+
+        group.userData.mixer = mixer;
+        group.userData.idleAction = idleAction;
+        group.userData.actionAction = actionAction;
+        group.userData.nextRandomActionAt = this.getNextActionDelay();
+        group.userData.actionTimer = 0;
+        this.animationMixers.push(mixer);
+    }
+
+    findAnimationClip(name) {
+        return this.objectAnimations.find((clip) => clip.name === name) || null;
+    }
+
+    getNextActionDelay() {
+        return 3 + Math.random() * 3;
     }
     
     createPlant(type) {
@@ -172,13 +378,13 @@ export class ItemManager {
         return group;
     }
     
-    update() {
-        const currentTime = Date.now() / 1000;
+    update(delta = 0.016) {
+        this.animationMixers.forEach((mixer) => mixer.update(delta));
         
-        this.items.forEach((item, index) => {
+        this.items.forEach((item) => {
             // Animation on spawn
             if (item.userData.animationTime < item.userData.animationDuration) {
-                item.userData.animationTime += 0.016;
+                item.userData.animationTime += delta;
                 const progress = item.userData.animationTime / item.userData.animationDuration;
                 const eased = 1 - Math.pow(1 - Math.min(progress, 1), 3);
                 const overshoot = 1 + Math.sin(Math.min(progress, 1) * Math.PI) * 0.18;
@@ -193,10 +399,18 @@ export class ItemManager {
                 item.position.y = item.userData.baseY;
             }
             
-            // Animal movement
-            if (item.userData.category === 'animals') {
-                item.position.z = item.userData.startZ + Math.sin(currentTime * 2 + index) * item.userData.moveAmplitude * 0.1;
-                item.rotation.y += 0.01;
+            if (item.userData.actionAction) {
+                item.userData.actionTimer += delta;
+
+                const actionRunning = item.userData.actionAction.isRunning();
+                if (!actionRunning && item.userData.actionTimer >= item.userData.nextRandomActionAt) {
+                    item.userData.actionTimer = 0;
+                    if (item.userData.idleAction) {
+                        item.userData.idleAction.stop();
+                    }
+                    item.userData.actionAction.reset();
+                    item.userData.actionAction.play();
+                }
             }
         });
     }

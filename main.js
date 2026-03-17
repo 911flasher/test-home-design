@@ -16,11 +16,19 @@ class GardenMakeover {
         this.audioManager = new AudioManager();
         this.particleSystem = new ParticleSystem(this.sceneManager.scene);
         this.uiController = new UIController(this.itemManager);
+        this.clock = new THREE.Clock();
         
         this.isDay = true;
         this.selectedItem = null;
-        this.gardenBounds = { minX: -7.5, maxX: 7.5, minZ: -7.5, maxZ: 7.5 };
-        this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -0.55);
+        
+        this.gardenBounds = { minX: -8.5, maxX: 8.5, minZ: -8.5, maxZ: 8.5 };
+        this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+        this.groundRoot = null;
+        this.groundMeshes = [];
+        this.groundHeightMeshes = [];
+        this.placementSurface = null;
+        this.placementY = 0.03;
+        this.cameraTarget = new THREE.Vector3(0, 0.45, 0);
         
         this.init();
     }
@@ -52,9 +60,35 @@ class GardenMakeover {
     
     setupCamera() {
         const camera = this.sceneManager.camera;
-        camera.fov = 60;
-        camera.position.set(-10, 67, 25);
-        camera.lookAt(0, 1.8,0);
+        // FOV controls how wide the scene feels: higher values show more area.
+        camera.fov = 58;
+        this.fitCameraToGarden();
+        camera.updateProjectionMatrix();
+        window.addEventListener('resize', () => this.fitCameraToGarden());
+    }
+
+    fitCameraToGarden() {
+        const camera = this.sceneManager.camera;
+        const width = this.gardenBounds.maxX - this.gardenBounds.minX;
+        const depth = this.gardenBounds.maxZ - this.gardenBounds.minZ;
+        // Lower fillRatio makes the whole location look smaller because the camera moves farther away.
+        const fillRatio = 0.48;
+
+        const verticalFov = THREE.MathUtils.degToRad(camera.fov);
+        const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * camera.aspect);
+
+        const fitHeightDistance = (depth / 2) / (Math.tan(verticalFov / 2) * fillRatio);
+        const fitWidthDistance = (width / 2) / (Math.tan(horizontalFov / 2) * fillRatio);
+        // Extra distance multiplier pushes the camera back so the scene occupies less screen space.
+        const distance = Math.max(fitHeightDistance, fitWidthDistance) * 1.95;
+        // Y makes the camera more top-down, Z keeps the scene tilted instead of fully flat.
+        const viewDirection = new THREE.Vector3(0, 1.85, 1.2).normalize();
+
+        // cameraTarget is the center point the camera always looks at.
+        camera.position.copy(this.cameraTarget).addScaledVector(viewDirection, distance);
+        camera.lookAt(this.cameraTarget);
+        camera.near = 0.1;
+        camera.far = Math.max(180, distance * 4);
         camera.updateProjectionMatrix();
     }
     
@@ -62,16 +96,41 @@ class GardenMakeover {
         const loader = new GLTFLoader();
         
         // Load ground
-        loader.load('./gltf/ground.glb', (gltf) => {
+        loader.load('./gltf/ground2.glb', (gltf) => {
             const ground = gltf.scene;
-            ground.scale.set(2.15, 1, 2.15);
+            ground.scale.set(1.65, 1.65, 1.65);
             this.sceneManager.scene.add(ground);
+            this.groundRoot = ground;
+            this.groundMeshes = [];
+            this.groundHeightMeshes = [];
+            ground.traverse((child) => {
+                if (child.isMesh) {
+                    this.groundMeshes.push(child);
+                    const name = (child.name || '').toLowerCase();
+                    if (name.includes('terrain') || name.includes('ground')) {
+                        this.groundHeightMeshes.push(child);
+                    }
+                }
+            });
+
+            const terrain = ground.getObjectByName('terrain');
+            if (terrain) {
+                const terrainBox = new THREE.Box3().setFromObject(terrain);
+                if (!terrainBox.isEmpty()) {
+                    this.placementY = terrainBox.max.y + 0.02;
+                    this.groundPlane.constant = -this.placementY;
+                    if (this.placementSurface) {
+                        this.placementSurface.position.y = this.placementY;
+                    }
+                }
+            }
+
             this.audioManager.playTheme();
         });
         
         // Load objects
-        loader.load('./gltf/objects.glb', (gltf) => {
-            this.itemManager.setObjectsModel(gltf.scene);
+        loader.load('./gltf/objects2.glb', (gltf) => {
+            this.itemManager.setObjectsModel(gltf.scene, gltf.animations);
         });
     }
     
@@ -81,8 +140,25 @@ class GardenMakeover {
     
     setupInteraction() {
         const raycaster = new THREE.Raycaster();
+        const heightRaycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
         const hitPoint = new THREE.Vector3();
+        const placementGeometry = new THREE.PlaneGeometry(
+            this.gardenBounds.maxX - this.gardenBounds.minX,
+            this.gardenBounds.maxZ - this.gardenBounds.minZ
+        );
+        const placementMaterial = new THREE.MeshBasicMaterial({
+            transparent: true,
+            opacity: 0,
+            side: THREE.DoubleSide,
+            depthWrite: false
+        });
+
+        this.placementSurface = new THREE.Mesh(placementGeometry, placementMaterial);
+        this.placementSurface.rotation.x = -Math.PI / 2;
+        this.placementSurface.position.set(0, this.placementY, 0);
+        this.placementSurface.name = 'placement-surface';
+        this.sceneManager.scene.add(this.placementSurface);
         
         window.addEventListener('click', (event) => {
             // Check if clicking on UI
@@ -94,10 +170,23 @@ class GardenMakeover {
             mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
             
             raycaster.setFromCamera(mouse, this.sceneManager.camera);
-            
-            if (raycaster.ray.intersectPlane(this.groundPlane, hitPoint)) {
-                const x = THREE.MathUtils.clamp(hitPoint.x, this.gardenBounds.minX, this.gardenBounds.maxX);
-                const z = THREE.MathUtils.clamp(hitPoint.z, this.gardenBounds.minZ, this.gardenBounds.maxZ);
+
+            let point = null;
+            if (this.placementSurface) {
+                const placementHits = raycaster.intersectObject(this.placementSurface, false);
+                if (placementHits.length) {
+                    point = placementHits[0].point.clone();
+                }
+            }
+
+            if (!point && raycaster.ray.intersectPlane(this.groundPlane, hitPoint)) {
+                point = hitPoint.clone();
+            }
+
+            if (point) {
+                const x = THREE.MathUtils.clamp(point.x, this.gardenBounds.minX, this.gardenBounds.maxX);
+                const z = THREE.MathUtils.clamp(point.z, this.gardenBounds.minZ, this.gardenBounds.maxZ);
+                const y = this.resolvePlacementYAt(x, z, heightRaycaster);
                 
                 if (!this.selectedItem) {
                     this.audioManager.playClick();
@@ -114,13 +203,14 @@ class GardenMakeover {
                     this.selectedItem.category,
                     this.selectedItem.type,
                     x,
-                    z
+                    z,
+                    y
                 );
                 
                 if (item) {
                     item.mesh.userData.startZ = z;
                     this.sceneManager.scene.add(item.mesh);
-                    this.particleSystem.createPlacementEffect(new THREE.Vector3(x, 0.62, z));
+                    this.particleSystem.createPlacementEffect(new THREE.Vector3(x, y + 0.08, z));
                     this.audioManager.playPlacement(this.selectedItem.type);
                     this.uiController.updateItemCount();
                     this.updateStats();
@@ -133,6 +223,22 @@ class GardenMakeover {
                 }
             }
         });
+    }
+
+    resolvePlacementYAt(x, z, raycaster) {
+        if (this.groundHeightMeshes.length) {
+            raycaster.set(
+                new THREE.Vector3(x, this.placementY + 30, z),
+                new THREE.Vector3(0, -1, 0)
+            );
+
+            const hits = raycaster.intersectObjects(this.groundHeightMeshes, true);
+            if (hits.length) {
+                return hits[0].point.y;
+            }
+        }
+
+        return this.placementY;
     }
     
     setupUI() {
@@ -281,9 +387,10 @@ class GardenMakeover {
     
     animate = () => {
         requestAnimationFrame(this.animate);
+        const delta = this.clock.getDelta();
         
         // Update items animations
-        this.itemManager.update();
+        this.itemManager.update(delta);
         
         // Update particles
         this.particleSystem.update();
